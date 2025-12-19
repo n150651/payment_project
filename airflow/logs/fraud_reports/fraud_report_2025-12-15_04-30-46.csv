@@ -1,0 +1,2 @@
+Transaction ID,User ID,Amount,Currency,Status
+3,999,15000.00,USD,FLAGGED_FRAUD

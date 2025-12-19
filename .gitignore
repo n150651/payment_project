@@ -1,0 +1,15 @@
+# Sensitive credentials
+.env
+
+# Large database files/logs (These should stay on your local machine)
+data/
+full_backup.sql
+monitoring/prometheus_data/
+monitoring/grafana_data/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# OS files
+.DS_Store

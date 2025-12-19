@@ -1,0 +1,14 @@
+global:
+  scrape_interval: 15s  # Collect metrics every 15 seconds
+
+scrape_configs:
+  # 1. Monitor Prometheus itself (Health check)
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
+  # 2. Monitor MySQL (Source & Replica)
+  - job_name: 'mysql_servers'
+    static_configs:
+      - targets: ['mysql-exporter:9104']
+  

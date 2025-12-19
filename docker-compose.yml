@@ -1,0 +1,187 @@
+version: '3.8'
+
+x-airflow-common: &airflow-common
+  build: ./airflow
+  # SECURITY FIX: Run container as YOUR user ID, but group 0 (root group) for permission compatibility
+  user: "${AIRFLOW_UID}:0"
+  environment:
+    - AIRFLOW__CORE__EXECUTOR=LocalExecutor
+    
+    # 1. METADATA DB (Securely uses .env vars)
+    - AIRFLOW__CORE__SQL_ALCHEMY_CONN=mysql+mysqldb://${AIRFLOW_DB_USER}:${AIRFLOW_DB_PASS}@mysql-source:3306/airflow_metadata
+    
+    - AIRFLOW__CORE__LOAD_EXAMPLES=False
+    
+    # 2. DATA CONNECTION (Reuses your existing REPLICA vars from .env)
+    - AIRFLOW_CONN_PAYMENT_DB_REPLICA=mysql+mysqldb://${REPLICA_USER}:${REPLICA_PASSWORD}@mysql-replica:3306/payment_db
+    
+  volumes:
+    - ./airflow/dags:/opt/airflow/dags
+    - ./airflow/logs:/opt/airflow/logs
+    - ./airflow/plugins:/opt/airflow/plugins
+  depends_on:
+    mysql-source:
+      condition: service_healthy
+
+services:
+  # --- YOUR NEW APP SERVICE ---
+  payment-app:
+    build: ./payment_app           # Build from the Dockerfile we just made
+    container_name: payment-api
+    ports:
+      - "8000:8000"                # Expose API to your browser
+    restart: always                # <--- Auto-restart if it crashes
+    environment:
+      - DB_NAME=payment_db
+      
+      # Source Connection (Internal Docker Network)
+      - SOURCE_USER=app_user
+      - SOURCE_PASSWORD=AppPass123!
+      - SOURCE_HOST=mysql-source   # <--- Connects to the container name
+      - SOURCE_PORT=3306           # <--- Internal port is 3306
+      
+      # Replica Connection (Internal Docker Network)
+      - REPLICA_USER=app_user
+      - REPLICA_PASSWORD=AppPass123!
+      - REPLICA_HOST=mysql-replica # <--- Connects to the container name
+      - REPLICA_PORT=3306          # <--- Internal port is ALSO 3306
+      
+    depends_on:
+      mysql-source:
+        condition: service_healthy # <--- THE KEY FIX: Wait for "Healthy" status
+      mysql-replica:
+        condition: service_started
+    networks:
+      - mysql-net
+
+  # --- SOURCE DATABASE ---
+  mysql-source:
+    image: mysql:8.0
+    container_name: mysql-source
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: payment_db
+    ports:
+      - "3306:3306"  # Host Port 3306 -> Container Port 3306
+    # NEW: Force configuration flags directly here
+    command: >
+      --default-authentication-plugin=mysql_native_password
+      --server-id=1
+      --log-bin=mysql-bin
+      --binlog_format=ROW
+      --gtid_mode=ON
+      --enforce-gtid-consistency=ON
+      --binlog_expire_logs_seconds=259200  
+      --max_binlog_size=100M               
+
+    volumes:
+      - ./data/source:/var/lib/mysql             # Persistent Data
+      # - ./config/source/my.cnf:/etc/mysql/my.cnf # Custom Config
+      - ./init_scripts:/docker-entrypoint-initdb.d # Init Scripts
+    networks:
+      - mysql-net
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      timeout: 20s
+      retries: 10
+
+  # --- REPLICA DATABASE ---
+  mysql-replica:
+    image: mysql:8.0
+    container_name: mysql-replica
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: payment_db  # <--- ADD THIS LINE!
+    ports:
+      - "3307:3306"  # Host Port 3307 -> Container Port 3306 (Avoid conflict)
+    # NEW: Force configuration flags directly here
+    command: >
+      --default-authentication-plugin=mysql_native_password
+      --server-id=2
+      --relay-log=mysql-relay-bin
+      --read-only=1
+      --gtid_mode=ON
+      --enforce-gtid-consistency=ON
+      --binlog_expire_logs_seconds=259200  
+      --max_binlog_size=100M 
+    volumes:
+      - ./data/replica:/var/lib/mysql            # Persistent Data
+      # - ./config/replica/my.cnf:/etc/mysql/my.cnf # Custom Config
+    networks:
+      - mysql-net
+    depends_on:
+      - mysql-source
+  # --- AIRFLOW SERVICES ---
+  
+  airflow-webserver:
+    <<: *airflow-common
+    container_name: airflow-webserver
+    command: webserver
+    ports:
+      - "8080:8080"
+    networks:
+      - mysql-net
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  airflow-scheduler:
+    <<: *airflow-common
+    container_name: airflow-scheduler
+    command: scheduler
+    networks:
+      - mysql-net
+  # --- MONITORING STACK ---
+
+  # 1. MySQL Exporter (Reads DB metrics)
+  mysql-exporter:
+    image: prom/mysqld-exporter
+    container_name: mysql-exporter
+    volumes:
+      - ./monitoring/prometheus/my.cnf:/.my.cnf
+    command:
+      - '--config.my-cnf=/.my.cnf'
+    ports:
+      - "9104:9104"
+    networks:
+      - mysql-net
+    depends_on:
+      - mysql-source
+
+  
+  
+  # 2. Prometheus (Collects the metrics)
+  prometheus:
+    image: prom/prometheus
+    container_name: prometheus
+    volumes:
+      # Keep your Config file!
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      # ADD THIS: Persist the metrics data
+      - ./monitoring/prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    networks:
+      - mysql-net
+
+  # 3. Grafana (Visualizes the metrics)
+  grafana:
+    image: grafana/grafana
+    container_name: grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    # --- ADD THIS BLOCK ---
+    volumes:
+      - ./monitoring/grafana_data:/var/lib/grafana
+    # ----------------------
+    networks:
+      - mysql-net
+
+networks:
+  mysql-net:
+    driver: bridge
