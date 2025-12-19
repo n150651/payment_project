@@ -1,17 +1,52 @@
-# Sensitive credentials
-.env
-
-# Large database files/logs (These should stay on your local machine)
-data/
-full_backup.sql
-monitoring/prometheus_data/
-monitoring/grafana_data/
-
-# Python cache
+# --- Python / Virtual Environment ---
+venv/
+.venv/
+env/
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
 
-# OS files
+# --- Environment Secrets (CRITICAL) ---
+.env
+airflow.env
+*.secrets
+secrets.txt
+
+# --- Docker & Databases ---
+data/
+*.sql
+*.sqlite
+mysql_data/
+prometheus_data/
+grafana_data/
+
+# --- Airflow ---
+airflow/logs/
+airflow/pids/
+airflow/airflow.db
+airflow/webserver_config.py
+
+# --- Monitoring & OS ---
 .DS_Store
-airflow/logs/
-airflow/logs/
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.log
