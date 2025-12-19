@@ -1,14 +1,18 @@
 global:
-  scrape_interval: 15s  # Collect metrics every 15 seconds
+  scrape_interval: 15s 
+  evaluation_interval: 15s
 
 scrape_configs:
-  # 1. Monitor Prometheus itself (Health check)
   - job_name: 'prometheus'
     static_configs:
       - targets: ['localhost:9090']
 
-  # 2. Monitor MySQL (Source & Replica)
-  - job_name: 'mysql_servers'
+  # 1. MySQL Metrics (From the Exporter)
+  - job_name: 'mysql'
     static_configs:
       - targets: ['mysql-exporter:9104']
-  
+
+  # 2. FastAPI Metrics (The "Real-Time" App)
+  - job_name: 'payment_app'
+    static_configs:
+      - targets: ['payment-api:8000'] # Points to your FastAPI container

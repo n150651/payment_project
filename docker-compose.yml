@@ -24,37 +24,31 @@ x-airflow-common: &airflow-common
       condition: service_healthy
 
 services:
-  # --- YOUR NEW APP SERVICE ---
   payment-app:
-    build: ./payment_app           # Build from the Dockerfile we just made
+    build: ./payment_app
     container_name: payment-api
+    # Multi-worker scaling: 
+    # If your machine has more cores, you can scale this service
     ports:
-      - "8000:8000"                # Expose API to your browser
-    restart: always                # <--- Auto-restart if it crashes
+      - "8000:8000"
+    restart: always
     environment:
       - DB_NAME=payment_db
-      
-      # Source Connection (Internal Docker Network)
       - SOURCE_USER=app_user
       - SOURCE_PASSWORD=AppPass123!
-      - SOURCE_HOST=mysql-source   # <--- Connects to the container name
-      - SOURCE_PORT=3306           # <--- Internal port is 3306
-      
-      # Replica Connection (Internal Docker Network)
+      - SOURCE_HOST=mysql-source
+      - SOURCE_PORT=3306
       - REPLICA_USER=app_user
       - REPLICA_PASSWORD=AppPass123!
-      - REPLICA_HOST=mysql-replica # <--- Connects to the container name
-      - REPLICA_PORT=3306          # <--- Internal port is ALSO 3306
-      
+      - REPLICA_HOST=mysql-replica
+      - REPLICA_PORT=3306
     depends_on:
       mysql-source:
-        condition: service_healthy # <--- THE KEY FIX: Wait for "Healthy" status
-      mysql-replica:
-        condition: service_started
+        condition: service_healthy
     networks:
       - mysql-net
 
-  # --- SOURCE DATABASE ---
+  # --- SOURCE DATABASE (Optimized for Writes) ---
   mysql-source:
     image: mysql:8.0
     container_name: mysql-source
@@ -62,8 +56,8 @@ services:
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
       MYSQL_DATABASE: payment_db
     ports:
-      - "3306:3306"  # Host Port 3306 -> Container Port 3306
-    # NEW: Force configuration flags directly here
+      - "3306:3306"
+    # DBA PERFORMANCE FLAGS ADDED BELOW
     command: >
       --default-authentication-plugin=mysql_native_password
       --server-id=1
@@ -71,30 +65,31 @@ services:
       --binlog_format=ROW
       --gtid_mode=ON
       --enforce-gtid-consistency=ON
-      --binlog_expire_logs_seconds=259200  
-      --max_binlog_size=100M               
-
+      --innodb_buffer_pool_size=1G 
+      --innodb_flush_log_at_trx_commit=2
+      --innodb_log_file_size=256M
+      --max_connections=500
+      --innodb_flush_method=O_DIRECT
     volumes:
-      - ./data/source:/var/lib/mysql             # Persistent Data
-      # - ./config/source/my.cnf:/etc/mysql/my.cnf # Custom Config
-      - ./init_scripts:/docker-entrypoint-initdb.d # Init Scripts
+      - ./data/source:/var/lib/mysql
+      - ./init_scripts:/docker-entrypoint-initdb.d
     networks:
       - mysql-net
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
-      timeout: 20s
-      retries: 10
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
-  # --- REPLICA DATABASE ---
+  # --- REPLICA DATABASE (Optimized for Read Throughput) ---
   mysql-replica:
     image: mysql:8.0
     container_name: mysql-replica
     environment:
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
-      MYSQL_DATABASE: payment_db  # <--- ADD THIS LINE!
+      MYSQL_DATABASE: payment_db
     ports:
-      - "3307:3306"  # Host Port 3307 -> Container Port 3306 (Avoid conflict)
-    # NEW: Force configuration flags directly here
+      - "3307:3306"
     command: >
       --default-authentication-plugin=mysql_native_password
       --server-id=2
@@ -102,17 +97,17 @@ services:
       --read-only=1
       --gtid_mode=ON
       --enforce-gtid-consistency=ON
-      --binlog_expire_logs_seconds=259200  
-      --max_binlog_size=100M 
+      --innodb_buffer_pool_size=1G
+      --max_connections=500
+      --innodb_flush_method=O_DIRECT
     volumes:
-      - ./data/replica:/var/lib/mysql            # Persistent Data
-      # - ./config/replica/my.cnf:/etc/mysql/my.cnf # Custom Config
+      - ./data/replica:/var/lib/mysql
     networks:
       - mysql-net
     depends_on:
       - mysql-source
   # --- AIRFLOW SERVICES ---
-  
+
   airflow-webserver:
     <<: *airflow-common
     container_name: airflow-webserver

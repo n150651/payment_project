@@ -1,19 +1,39 @@
 from fastapi import FastAPI, Depends, HTTPException
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import text, select
 import models
 from database import engine_source, get_write_db, get_read_db
-from sqlalchemy import text
+from prometheus_fastapi_instrumentator import Instrumentator
+from fastapi import Security, HTTPException, status
+from fastapi.security.api_key import APIKeyHeader
 
-# Create tables ONLY on the Source (Replica will copy them automatically)
-models.Base.metadata.create_all(bind=engine_source)
+app = FastAPI(title="Payment API")
+API_KEY = os.getenv("API_KEY")
+api_key_header = APIKeyHeader(name="X-API-KEY", auto_error=False)
 
-app = FastAPI(title="Payment API (Source/Replica Architecture)")
+async def get_api_key(api_key_header: str = Security(api_key_header)):
+    if api_key_header == API_KEY:
+        return api_key_header
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Could not validate credentials",
+        )
+# Add this at the bottom of main.py
+Instrumentator().instrument(app).expose(app)
+
+# NOTE: In production, we don't usually use metadata.create_all with async 
+# at runtime. We use migrations (Alembic). But for this step:
+# models.Base.metadata.create_all(bind=engine_source) is handled outside or via sync engine.
+
+app = FastAPI(title="Payment API (Async Source/Replica Architecture)")
 
 # --- WRITE OPERATION (Goes to Source) ---
 @app.post("/transactions/", response_model=models.TransactionResponse)
-def create_transaction(
+async def create_transaction(
     transaction: models.TransactionCreate, 
-    db: Session = Depends(get_write_db) # <--- Uses Source DB
+    db: AsyncSession = Depends(get_write_db),
+    api_key: str = Depends(get_api_key) # <--- New Security Layer
 ):
     new_txn = models.TransactionDB(
         user_id=transaction.user_id,
@@ -22,39 +42,47 @@ def create_transaction(
         status="SUCCESS"
     )
     db.add(new_txn)
-    db.commit()
-    db.refresh(new_txn)
+    
+    # 'await' is the key: it pauses THIS request but keeps the SERVER active
+    await db.commit() 
+    await db.refresh(new_txn)
     return new_txn
 
 # --- READ OPERATION (Goes to Replica) ---
 @app.get("/transactions/{transaction_id}", response_model=models.TransactionResponse)
-def read_transaction(
+async def read_transaction(
     transaction_id: int, 
-    db: Session = Depends(get_read_db) # <--- Uses Replica DB
+    db: AsyncSession = Depends(get_read_db) # <--- Uses Async Replica DB
 ):
-    txn = db.query(models.TransactionDB).filter(models.TransactionDB.id == transaction_id).first()
+    # In Async SQLAlchemy, we use 'select' instead of 'db.query'
+    result = await db.execute(
+        select(models.TransactionDB).filter(models.TransactionDB.id == transaction_id)
+    )
+    txn = result.scalars().first()
+    
     if txn is None:
         raise HTTPException(status_code=404, detail="Transaction not found")
     return txn
 
+# --- HEALTH CHECK (Tests both DBs) ---
 @app.get("/health")
-def health_check(
-    write_db: Session = Depends(get_write_db),
-    read_db: Session = Depends(get_read_db)
+async def health_check(
+    write_db: AsyncSession = Depends(get_write_db),
+    read_db: AsyncSession = Depends(get_read_db)
 ):
     health_status = {"status": "healthy", "checks": {}}
     
+    # Check Source
     try:
-        # Test Source (Write)
-        write_db.execute(text("SELECT 1"))
+        await write_db.execute(text("SELECT 1"))
         health_status["checks"]["source_db"] = "up"
     except Exception as e:
         health_status["checks"]["source_db"] = f"down: {str(e)}"
         health_status["status"] = "unhealthy"
 
+    # Check Replica
     try:
-        # Test Replica (Read)
-        read_db.execute(text("SELECT 1"))
+        await read_db.execute(text("SELECT 1"))
         health_status["checks"]["replica_db"] = "up"
     except Exception as e:
         health_status["checks"]["replica_db"] = f"down: {str(e)}"
